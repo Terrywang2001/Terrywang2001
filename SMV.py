@@ -4,8 +4,9 @@ from sklearn import svm
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from joblib import dump, load
+from typing import List
 import numpy as np
-from models import Item, SentenceCategoryList
+from models import Item, SentenceCategory
 
 app = FastAPI()
 
@@ -18,10 +19,10 @@ except:
     vectorizer = None
 
 @app.post("/train/")
-def train_model(train_data: SentenceCategoryList, test_size: float = 0.25):
+def train_model(train_data: List[SentenceCategory], test_size: float = 0.25):
     try:
-        sentences = [data.sentence for data in train_data.data]
-        labels = [data.category for data in train_data.data]
+        sentences = [item.sentence for item in train_data]
+        labels = [item.category for item in train_data]
         vectorizer = TfidfVectorizer()
         X = vectorizer.fit_transform(sentences)
 
@@ -29,7 +30,7 @@ def train_model(train_data: SentenceCategoryList, test_size: float = 0.25):
         best_random_state = None
         best_model = None
 
-        for random_state in range(1, 501):
+        for random_state in range(1, 201):
             X_train, X_test, y_train, y_test = train_test_split(X, labels, test_size=test_size, random_state=random_state)
             model = svm.SVC(kernel='linear')
             model.fit(X_train, y_train)
