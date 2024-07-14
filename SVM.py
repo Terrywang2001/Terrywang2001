@@ -1,105 +1,140 @@
 from fastapi import FastAPI, HTTPException, Query
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn import svm
+from gensim.models import Word2Vec
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+from sklearn.naive_bayes import MultinomialNB
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
+import joblib
 from joblib import dump, load
 import numpy as np
-from models import Item, SentenceCategory
 from typing import List
+from models import Item, SentenceCategory
+import os
+
 
 app = FastAPI()
 
-# Global variables to store model and vectorizer
-vectorizer = TfidfVectorizer()
-model = svm.SVC(kernel='linear')
+
+# Global variables to store models and vectorizers
+tfidf_vectorizer = TfidfVectorizer()
+svm_model = SVC(kernel='linear')
+logistic_model = LogisticRegression()
+count_vectorizer = CountVectorizer()
+naive_bayes_model = MultinomialNB()
+
+# Global training data list
+current_data = []
 
 # Load model and vectorizer if available
-try:
-    vectorizer = load('tfidf_vectorizer.joblib')
-    model = load('svm_model.joblib')
-except Exception as e:
-    print(f"Error loading model or vectorizer: {e}")
+def load_models_and_vectorizers():
+    global tfidf_vectorizer, svm_model, logistic_model, count_vectorizer, naive_bayes_model
+    try:
+        tfidf_vectorizer = joblib.load('tfidf_vectorizer.joblib') if os.path.exists('tfidf_vectorizer.joblib') else tfidf_vectorizer
+        svm_model = joblib.load('svm_model.joblib') if os.path.exists('svm_model.joblib') else svm_model
+        logistic_model = joblib.load('logistic_regression.joblib') if os.path.exists('logistic_regression.joblib') else logistic_model
+        count_vectorizer = joblib.load('count_vectorizer.joblib') if os.path.exists('count_vectorizer.joblib') else count_vectorizer
+        naive_bayes_model = joblib.load('naive_bayes_model.joblib') if os.path.exists('naive_bayes_model.joblib') else naive_bayes_model
+    except Exception as e:
+        print(f"Error loading models or vectorizers: {e}")
+
+load_models_and_vectorizers()
 
 @app.post("/train/")
-def train_model(train_data: List[SentenceCategory], update_mode: str = Query(..., description="Specify 'append' or 'replace' for data update mode."), test_size: float = 0.2):
-    global current_data, vectorizer, model
+async def train_model(
+    train_data: List[SentenceCategory],
+    model_type: str = Query(..., description="Specify 'svm' or 'naive_bayes' for model type."),
+    update_mode: str = Query(..., description="Specify 'append' or 'replace' for data update mode."),
+    test_size: float = 0.2
+):
+    global current_data, tfidf_vectorizer, svm_model, logistic_model, count_vectorizer, naive_bayes_model
+    
+    # Debug print statements
+    print(f"Received model_type: {model_type}")
+    print(f"Received update_mode: {update_mode}")
+    print(f"Received train_data: {train_data}")
 
+    # Update or replace training data based on user input
     if update_mode == "append":
-        print("Appending " + str(len(train_data)) + " new records.")
         current_data.extend(train_data)
     elif update_mode == "replace":
-        print("Replacing current data with " + str(len(train_data)) + " new records.")
         current_data = train_data
     else:
-        raise HTTPException(status_code=400, detail="Invalid update mode. Choose 'append' or 'replace'.")
-    
-    # Print current data for debugging
-    print("Current data count: " + str(len(current_data)))
-    
-    if len(current_data) < 5:
-        raise HTTPException(status_code=400, detail="Not enough data for training. A minimum of 5 data points is required.")
+        raise HTTPException(status_code=400, detail="Invalid update mode specified.")
 
-    try:
-        # Reinitialize vectorizer and model each time to ensure consistency
-        vectorizer = TfidfVectorizer()
-        sentences = [item.sentence for item in current_data]
-        labels = [item.category for item in current_data]
-        X = vectorizer.fit_transform(sentences)
+    best_accuracy = 0
+    best_random_state = None
+    best_model = None
+    best_vectorizer = None
 
-        model = svm.SVC(kernel='linear')
-        best_accuracy = 0
-        best_random_state = None
-        best_model = None
+    sentences = [item.sentence for item in current_data]
+    labels = [item.category for item in current_data]
 
-        # Find the best model
+    if model_type == "svm":
+        # Training logic for SVM + TF-IDF
+        X = tfidf_vectorizer.fit_transform(sentences)
+        y = labels
+
         for random_state in range(1, 501):
-            X_train, X_test, y_train, y_test = train_test_split(X, labels, test_size=test_size, random_state=random_state, stratify=labels)
-            local_model = svm.SVC(kernel='linear')
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=random_state, stratify=y)
+            local_model = SVC(kernel='linear')
             local_model.fit(X_train, y_train)
             y_pred = local_model.predict(X_test)
             accuracy = accuracy_score(y_test, y_pred)
-
+            
             if accuracy > best_accuracy:
                 best_accuracy = accuracy
                 best_random_state = random_state
                 best_model = local_model
-
-        # Retrain the best model with the entire dataset
-        X_train, X_test, y_train, y_test = train_test_split(X, labels, test_size=test_size, random_state=best_random_state, stratify=labels)
-        best_model.fit(X_train, y_train)
+                best_vectorizer = tfidf_vectorizer
         
-        # Save the retrained model and vectorizer
-        model = best_model
-        dump(best_model, 'svm_model.joblib')
-        dump(vectorizer, 'tfidf_vectorizer.joblib')
+        svm_model = best_model
+        joblib.dump(svm_model, 'svm_model.joblib')
+        joblib.dump(best_vectorizer, 'tfidf_vectorizer.joblib')
 
-        return {"message": "Model trained successfully with best random_state", "accuracy": best_accuracy, "random_state": best_random_state}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    elif model_type == "naive_bayes":
+        # Training logic for Naive Bayes using CountVectorizer
+        X = count_vectorizer.fit_transform(sentences)
+        y = np.array(labels)
 
+        for random_state in range(1, 501):
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=random_state)
+            local_model = MultinomialNB()
+            local_model.fit(X_train, y_train)
+            y_pred = local_model.predict(X_test)
+            accuracy = accuracy_score(y_test, y_pred)
+            
+            if accuracy > best_accuracy:
+                best_accuracy = accuracy
+                best_random_state = random_state
+                best_model = local_model
+                best_vectorizer = count_vectorizer
+        
+        naive_bayes_model = best_model
+        joblib.dump(naive_bayes_model, 'naive_bayes_model.joblib')
+        joblib.dump(best_vectorizer, 'count_vectorizer.joblib')
+    else:
+        raise HTTPException(status_code=400, detail="Invalid model type specified.")
+
+    return {"message": f"Model trained successfully using {model_type}", "accuracy": best_accuracy, "random_state": best_random_state}
 
 @app.post("/predict/")
-def predict(item: Item):
-    if not hasattr(model, "support_"):  # Check if model is fitted
-        raise HTTPException(status_code=500, detail="Model is not fitted yet.")
-    try:
-        text_features = vectorizer.transform([item.text])
-        prediction = model.predict(text_features)
-        return {"sentence": item.text, "prediction": prediction[0]}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error during prediction: {e}")
+async def predict(item: Item, model_type: str = Query(..., description="Specify 'svm' or 'naive_bayes' for model type.")):
+    global tfidf_vectorizer, svm_model, logistic_model, count_vectorizer, naive_bayes_model
 
-"""  def predict(item: Item):
-    global vectorizer, model  # 确保使用全局变量中加载的模型和向量化器
-    if model is None or vectorizer is None:
-        raise HTTPException(status_code=500, detail="Model or vectorizer is not initialized.")
+    if model_type == "svm":
+        if not hasattr(svm_model, "support_"):
+            raise HTTPException(status_code=500, detail="SVM model is not fitted yet.")
+        text_features = tfidf_vectorizer.transform([item.text])
+        prediction = svm_model.predict(text_features)
+    elif model_type == "naive_bayes":
+        if not hasattr(naive_bayes_model, 'class_count_'):
+            raise HTTPException(status_code=500, detail="Naive Bayes model is not fitted yet.")
+        text_features = count_vectorizer.transform([item.text])
+        prediction = naive_bayes_model.predict(text_features)
+    else:
+        raise HTTPException(status_code=400, detail="Invalid model type specified.")
 
-    try:
-        text_features = vectorizer.transform([item.text])
-        prediction = model.predict(text_features)
-        return {"sentence": item.text, "prediction": prediction[0]}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error during prediction: {e}")
-"""
+    return {"sentence": item.text, "prediction": prediction[0]}
 
